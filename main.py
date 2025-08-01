@@ -6,6 +6,9 @@ import requests
 import opencc
 import pickle
 import numpy as np
+import shutil
+import logging
+import urllib3
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
@@ -15,16 +18,30 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
 from tqdm import tqdm
 
+# 禁用所有SSL警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename='iptv_processor.log'
+)
+logger = logging.getLogger(__name__)
+
 # --- 全局配置与初始化 ---
 timestart = datetime.now()
 print(f"🚀 AI学习型IPTV系统启动 @ {timestart.strftime('%Y-%m-%d %H:%M:%S')}")
+logger.info(f"系统启动 @ {timestart}")
 
 # --- 修复 OpenCC 加载问题 ---
 try:
     CC_CONVERTER = opencc.OpenCC('t2s')
     print("✅ OpenCC转换器已成功加载内置配置 't2s'")
+    logger.info("OpenCC转换器已成功加载内置配置 't2s'")
 except Exception as e:
     print(f"❌ 错误: 加载OpenCC转换器失败 - {e}")
+    logger.error(f"加载OpenCC转换器失败: {e}")
     class FallbackConverter:
         def convert(self, text):
             trad_to_simp = {
@@ -35,17 +52,25 @@ except Exception as e:
             return ''.join(trad_to_simp.get(char, char) for char in text)
     CC_CONVERTER = FallbackConverter()
     print("✅ 使用简易简繁转换器")
+    logger.info("使用简易简繁转换器")
 
 # 加载分类配置
-with open('category_config.json', 'r', encoding='utf-8') as f:
-    CATEGORY_CONFIG = json.load(f)
-
-# 创建所有类别ID的列表
-ALL_CATEGORIES = []
-for category_type in CATEGORY_CONFIG.values():
-    for cat_id in category_type:
-        ALL_CATEGORIES.append(cat_id)
-ALL_CATEGORIES.extend(['cw', 'zb', 'mv', 'radio', 'lx', 'other'])
+try:
+    with open('category_config.json', 'r', encoding='utf-8') as f:
+        CATEGORY_CONFIG = json.load(f)
+    print("✅ 分类配置加载成功")
+    logger.info("分类配置加载成功")
+    
+    # 创建所有类别ID的列表
+    ALL_CATEGORIES = []
+    for category_type in CATEGORY_CONFIG.values():
+        for cat_id in category_type:
+            ALL_CATEGORIES.append(cat_id)
+    ALL_CATEGORIES.extend(['cw', 'zb', 'mv', 'radio', 'lx', 'other'])
+except Exception as e:
+    print(f"❌ 加载分类配置失败: {e}")
+    logger.error(f"加载分类配置失败: {e}")
+    exit(1)
 
 # 配置 requests 会话
 def create_requests_session():
@@ -63,6 +88,7 @@ def create_requests_session():
     adapter = HTTPAdapter(max_retries=retries, pool_connections=100, pool_maxsize=100)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
+    session.verify = False  # 禁用证书验证
     return session
 
 HTTP_SESSION = create_requests_session()
@@ -101,6 +127,12 @@ class AIClassifier:
         self.training_labels = []
         self.model_file = "ai_model.pkl"
         self.training_data_file = "training_data.pkl"
+        self.backup_model_file = "backup_model.pkl"
+        self.backup_data_file = "backup_data.pkl"
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(self.model_file), exist_ok=True)
+        os.makedirs(os.path.dirname(self.training_data_file), exist_ok=True)
         
         # 尝试加载现有模型
         if os.path.exists(self.model_file) and os.path.exists(self.training_data_file):
@@ -112,10 +144,29 @@ class AIClassifier:
                     self.training_data = data['texts']
                     self.training_labels = data['labels']
                 print(f"✅ 加载AI模型，已有 {len(self.training_data)} 条训练数据")
-            except:
-                print("❌ 模型加载失败，将创建新模型")
-                self._init_new_model()
+                logger.info(f"加载AI模型，已有 {len(self.training_data)} 条训练数据")
+            except Exception as e:
+                print(f"⚠️ 模型加载错误: {e}")
+                logger.error(f"模型加载错误: {e}")
+                # 尝试从备份恢复
+                if os.path.exists(self.backup_model_file) and os.path.exists(self.backup_data_file):
+                    try:
+                        shutil.copy(self.backup_model_file, self.model_file)
+                        shutil.copy(self.backup_data_file, self.training_data_file)
+                        print("♻️ 从备份恢复模型")
+                        logger.info("从备份恢复模型")
+                        self.__init__()  # 重新初始化
+                    except Exception as backup_e:
+                        print(f"⚠️ 备份恢复失败: {backup_e}")
+                        logger.error(f"备份恢复失败: {backup_e}")
+                        self._init_new_model()
+                else:
+                    print("⚠️ 无可用备份，创建新模型")
+                    logger.info("无可用备份，创建新模型")
+                    self._init_new_model()
         else:
+            print("ℹ️ 未找到模型文件，创建新模型")
+            logger.info("未找到模型文件，创建新模型")
             self._init_new_model()
     
     def _init_new_model(self):
@@ -127,6 +178,7 @@ class AIClassifier:
         # 添加初始训练数据
         self._add_initial_training_data()
         print("✅ 创建新AI模型")
+        logger.info("创建新AI模型")
     
     def _add_initial_training_data(self):
         """添加初始训练数据"""
@@ -135,13 +187,11 @@ class AIClassifier:
             for cat_id, info in category_type.items():
                 # 添加关键词
                 for keyword in info.get("keywords", []):
-                    self.training_data.append(keyword)
-                    self.training_labels.append(cat_id)
+                    self._add_sample(keyword, cat_id)
                 
                 # 添加频道名称
                 for name in info.get("dictionary", []):
-                    self.training_data.append(name)
-                    self.training_labels.append(cat_id)
+                    self._add_sample(name, cat_id)
         
         # 添加特殊类别
         special_categories = {
@@ -149,16 +199,21 @@ class AIClassifier:
             'zb': ["直播中国", "中国直播"],
             'mv': ["音乐", "MTV", "演唱会", "音乐现场"],
             'radio': ["广播", "FM", "AM", "电台"],
-            'lx': ["回看", "重播", "回放", "录像", "录播"]
+            'lx': ["回看", "重播", "回放", "录像", "录播"],
+            'other': ["其他", "未知", "测试"]
         }
         
         for cat_id, examples in special_categories.items():
             for example in examples:
-                self.training_data.append(example)
-                self.training_labels.append(cat_id)
+                self._add_sample(example, cat_id)
         
         # 训练初始模型
         self._train_model()
+    
+    def _add_sample(self, text, label):
+        """添加单个训练样本"""
+        self.training_data.append(text)
+        self.training_labels.append(label)
     
     def _train_model(self):
         """训练AI模型"""
@@ -179,18 +234,23 @@ class AIClassifier:
             return "other"
         
         # 预测概率
-        proba = self.model.predict_proba([text])[0]
-        max_proba_idx = np.argmax(proba)
-        max_proba = proba[max_proba_idx]
-        
-        # 获取类别
-        predicted_class = self.model.classes_[max_proba_idx]
-        
-        # 如果置信度低于阈值，返回"other"
-        if max_proba < 0.6:  # 可调整的置信度阈值
+        try:
+            proba = self.model.predict_proba([text])[0]
+            max_proba_idx = np.argmax(proba)
+            max_proba = proba[max_proba_idx]
+            
+            # 获取类别
+            predicted_class = self.model.classes_[max_proba_idx]
+            
+            # 如果置信度低于阈值，返回"other"
+            if max_proba < 0.6:  # 可调整的置信度阈值
+                return "other"
+            
+            return predicted_class
+        except Exception as e:
+            print(f"⚠️ AI预测出错: {e}")
+            logger.error(f"AI预测出错: {e}")
             return "other"
-        
-        return predicted_class
     
     def add_feedback(self, channel_name, correct_category):
         """添加用户反馈数据用于学习"""
@@ -201,21 +261,35 @@ class AIClassifier:
         # 重新训练模型
         self._train_model()
         
-        print(f"📝 已学习新样本: {channel_name} → {correct_category}")
+        print(f"📝 已学习新样本: {channel_name[:20]}... → {correct_category}")
+        logger.info(f"已学习新样本: {channel_name[:20]}... → {correct_category}")
     
     def save_model(self):
         """保存模型到文件"""
-        # 保存模型
-        with open(self.model_file, 'wb') as f:
-            pickle.dump(self.model, f)
-        
-        # 保存训练数据
-        with open(self.training_data_file, 'wb') as f:
-            data = {
-                'texts': self.training_data,
-                'labels': self.training_labels
-            }
-            pickle.dump(data, f)
+        try:
+            # 先备份旧模型
+            if os.path.exists(self.model_file):
+                shutil.copy(self.model_file, self.backup_model_file)
+            if os.path.exists(self.training_data_file):
+                shutil.copy(self.training_data_file, self.backup_data_file)
+            
+            # 保存模型
+            with open(self.model_file, 'wb') as f:
+                pickle.dump(self.model, f)
+            
+            # 保存训练数据
+            with open(self.training_data_file, 'wb') as f:
+                data = {
+                    'texts': self.training_data,
+                    'labels': self.training_labels
+                }
+                pickle.dump(data, f)
+            
+            print(f"💾 AI模型已保存，当前训练数据: {len(self.training_data)} 条")
+            logger.info(f"AI模型已保存，训练数据: {len(self.training_data)} 条")
+        except Exception as e:
+            print(f"❌ 保存模型失败: {e}")
+            logger.error(f"保存模型失败: {e}")
 
 # 初始化AI分类器
 ai_classifier = AIClassifier()
@@ -228,6 +302,7 @@ def read_txt_to_array(file_name):
             return [line.strip() for line in file if line.strip()]
     except Exception as e:
         print(f"读取文件 '{file_name}' 出错: {e}")
+        logger.error(f"读取文件 '{file_name}' 出错: {e}")
         return []
 
 def load_corrections(filename):
@@ -241,8 +316,11 @@ def load_corrections(filename):
                         correct_name = parts[0].strip()
                         for name in parts[1:]:
                             corrections[name.strip()] = correct_name
+        print(f"✅ 加载纠错文件: {filename}")
+        logger.info(f"加载纠错文件: {filename}")
     except Exception as e:
         print(f"加载纠错文件 '{filename}' 出错: {e}")
+        logger.error(f"加载纠错文件 '{filename}' 出错: {e}")
     return corrections
 
 def fetch_source_content(url):
@@ -261,9 +339,11 @@ def fetch_source_content(url):
             except UnicodeDecodeError:
                 continue
         print(f"警告: 无法解码源 {url}")
+        logger.warning(f"无法解码源 {url}")
         return None
     except requests.exceptions.RequestException as e:
         print(f"处理URL源出错: {url} ({e})")
+        logger.error(f"处理URL源出错: {url} ({e})")
         return None
 
 def convert_m3u_to_txt(m3u_content):
@@ -351,6 +431,7 @@ def parse_and_clean_channels(source_content, corrections_name):
                 
         except Exception as e:
             print(f"解析频道行失败: {line} - {e}")
+            logger.error(f"解析频道行失败: {line} - {e}")
     return channels
 
 def check_channel_availability(channel_info, timeout=2):
@@ -404,6 +485,34 @@ def sort_data(order, data):
     order_dict = {name: i for i, name in enumerate(order)}
     return sorted(data, key=lambda line: order_dict.get(line.split(',')[0], len(order)))
 
+def balance_categories(categorized_lists):
+    """平衡分类，防止单个分类频道过多"""
+    MAX_PER_CATEGORY = 500  # 单个分类最大频道数
+    
+    for cat_id, items in list(categorized_lists.items()):
+        if len(items) > MAX_PER_CATEGORY:
+            print(f"⚠️ 分类 {cat_id} 频道过多({len(items)})，进行自动分流")
+            logger.warning(f"分类 {cat_id} 频道过多({len(items)})，进行自动分流")
+            
+            # 将超出部分重新分类
+            overflow = items[MAX_PER_CATEGORY:]
+            categorized_lists[cat_id] = items[:MAX_PER_CATEGORY]
+            
+            for item in overflow:
+                try:
+                    channel_name, _ = item.split(',', 1)
+                    new_cat = classify_channel(channel_name)
+                    if new_cat not in categorized_lists:
+                        categorized_lists[new_cat] = []
+                    categorized_lists[new_cat].append(item)
+                except:
+                    # 如果分类失败，放入其他
+                    if 'other' not in categorized_lists:
+                        categorized_lists['other'] = []
+                    categorized_lists['other'].append(item)
+    
+    return categorized_lists
+
 def save_files(categorized_lists):
     all_lines = []
     utc_time = datetime.now(timezone.utc)
@@ -423,18 +532,23 @@ def save_files(categorized_lists):
             total_channels += len(lines)
 
     # 按分类优先级输出
-    for category_type in CATEGORY_CONFIG.values():
-        for cat_id, info in category_type.items():
-            if cat_id in categorized_lists and categorized_lists[cat_id]:
-                add_category(info["name"], categorized_lists[cat_id], info.get("dictionary"))
+    # 1. 地区分类
+    for cat_id in CATEGORY_CONFIG.get("region_categories", {}):
+        if cat_id in categorized_lists and categorized_lists[cat_id]:
+            info = CATEGORY_CONFIG["region_categories"][cat_id]
+            add_category(info["name"], categorized_lists[cat_id], info.get("dictionary"))
     
-    # 特殊类别
-    add_category("春晚", categorized_lists.get('cw', []))
-    add_category("直播中国", categorized_lists.get('zb', []))
-    add_category("音乐MV", categorized_lists.get('mv', []))
-    add_category("收音机频道", categorized_lists.get('radio', []))
-    add_category("录像回放", categorized_lists.get('lx', []))
-    add_category("其他频道", categorized_lists.get('other', []))
+    # 2. 内容分类
+    for cat_id in CATEGORY_CONFIG.get("content_categories", {}):
+        if cat_id in categorized_lists and categorized_lists[cat_id]:
+            info = CATEGORY_CONFIG["content_categories"][cat_id]
+            add_category(info["name"], categorized_lists[cat_id], info.get("dictionary"))
+    
+    # 3. 特殊分类
+    for cat_id in CATEGORY_CONFIG.get("special_categories", {}):
+        if cat_id in categorized_lists and categorized_lists[cat_id]:
+            info = CATEGORY_CONFIG["special_categories"][cat_id]
+            add_category(info["name"], categorized_lists[cat_id])
 
     final_content = "\n".join(all_lines)
 
@@ -442,8 +556,10 @@ def save_files(categorized_lists):
         with open("live.txt", "w", encoding='utf-8') as f:
             f.write(final_content)
         print("✅ 频道文件已保存: live.txt")
+        logger.info("频道文件已保存: live.txt")
     except Exception as e:
         print(f"❌ 保存文件出错: {e}")
+        logger.error(f"保存文件出错: {e}")
 
     # 生成M3U文件
     try:
@@ -462,8 +578,10 @@ def save_files(categorized_lists):
         with open("live.m3u", "w", encoding='utf-8') as f:
             f.write(m3u_content)
         print("✅ M3U文件已保存: live.m3u")
+        logger.info("M3U文件已保存: live.m3u")
     except Exception as e:
         print(f"❌ 生成M3U文件出错: {e}")
+        logger.error(f"生成M3U文件出错: {e}")
 
     return total_channels
 
@@ -487,6 +605,7 @@ def collect_feedback(categorized_lists):
             if ai_prediction != 'other':
                 ai_classifier.add_feedback(channel_name, ai_prediction)
                 print(f"🤖 自动学习: {channel_name[:20]}... → {ai_prediction}")
+                logger.info(f"自动学习: {channel_name[:20]}... → {ai_prediction}")
         except:
             pass
 
@@ -494,6 +613,7 @@ def collect_feedback(categorized_lists):
 
 def main():
     print("➡️ 步骤 1/5: 加载本地资源...")
+    logger.info("步骤 1/5: 加载本地资源")
     assets_dir = 'assets'
     os.makedirs(assets_dir, exist_ok=True)
     
@@ -514,9 +634,11 @@ def main():
 
     if not urls_to_process:
         print(f"❌ 错误: '{urls_file}' 为空或不存在，程序退出。")
+        logger.error(f"'{urls_file}' 为空或不存在，程序退出")
         return
 
     print(f"\n➡️ 步骤 2/5: 获取 {len(urls_to_process)} 个在线源...")
+    logger.info(f"步骤 2/5: 获取 {len(urls_to_process)} 个在线源")
     all_raw_channels = {}
     for url in tqdm(urls_to_process, desc="处理源"):
         try:
@@ -533,14 +655,18 @@ def main():
                         all_raw_channels[name] = url
         except Exception as e:
             print(f"❌ 处理源失败: {url} - {e}")
+            logger.error(f"处理源失败: {url} - {e}")
     
     print(f"\n✅ 成功获取并解析了 {len(all_raw_channels)} 个不重复的频道。")
+    logger.info(f"成功获取并解析了 {len(all_raw_channels)} 个不重复的频道")
 
     if not all_raw_channels:
         print("❌ 错误: 没有获取到任何频道，程序退出")
+        logger.error("没有获取到任何频道，程序退出")
         return
 
     print(f"\n➡️ 步骤 3/5: 检测 {len(all_raw_channels)} 个频道的有效性...")
+    logger.info(f"步骤 3/5: 检测 {len(all_raw_channels)} 个频道的有效性")
     valid_channels = []
     total = len(all_raw_channels)
     
@@ -557,8 +683,10 @@ def main():
                 pass
     
     print(f"\n✅ 检测完成，发现 {len(valid_channels)} 个有效频道。")
+    logger.info(f"检测完成，有效频道: {len(valid_channels)}")
 
     print("\n➡️ 步骤 4/5: 智能分类频道...")
+    logger.info("步骤 4/5: 智能分类频道")
     categorized_lists = {}
     
     for name, url in tqdm(valid_channels, desc="分类频道"):
@@ -567,22 +695,29 @@ def main():
             categorized_lists[category] = []
         categorized_lists[category].append(f"{name},{url}")
     
+    # 平衡分类
+    categorized_lists = balance_categories(categorized_lists)
+    
     # 收集反馈用于学习
     collect_feedback(categorized_lists)
     
     # 打印分类统计
     print("\n📊 分类统计:")
+    logger.info("分类统计:")
     for cat_id, channels in categorized_lists.items():
         cat_name = "其他"
-        for category_type in CATEGORY_CONFIG.values():
-            for cid, info in category_type.items():
-                if cid == cat_id:
-                    cat_name = info["name"]
-                    break
+        # 在所有分类类型中查找名称
+        for cat_type in CATEGORY_CONFIG.values():
+            if cat_id in cat_type:
+                cat_name = cat_type[cat_id]["name"]
+                break
         print(f"  - {cat_name}: {len(channels)} 个频道")
+        logger.info(f"  - {cat_name}: {len(channels)} 个频道")
     print("✅ 分类完成。")
+    logger.info("分类完成")
 
     print("\n➡️ 步骤 5/5: 生成最终文件...")
+    logger.info("步骤 5/5: 生成最终文件")
     total_saved = save_files(categorized_lists)
 
     print("\n--- 任务完成 ---")
@@ -591,10 +726,11 @@ def main():
     minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
     print(f"📊 总耗时: {minutes}分 {seconds}秒")
     print(f"📊 总计有效频道数: {total_saved}")
+    logger.info(f"总耗时: {minutes}分 {seconds}秒")
+    logger.info(f"总计有效频道数: {total_saved}")
     
     # 保存AI模型状态
     ai_classifier.save_model()
-    print(f"💾 AI模型已保存，当前训练数据: {len(ai_classifier.training_data)} 条")
 
 if __name__ == "__main__":
     main()
