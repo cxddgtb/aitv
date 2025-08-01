@@ -1,5 +1,4 @@
 name: 'IPTV频道自动更新+AI学习'
-
 on:
   schedule:
     - cron: '0 16 * * *'  # 每天UTC时间16:00运行(北京时间00:00)
@@ -52,5 +51,4 @@ jobs:
           git commit -m "🤖 AI学习更新 $(date +'%Y-%m-%d %H:%M')"
           git push origin main
         env:
-          # 显式使用PAT进行认证
           GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
