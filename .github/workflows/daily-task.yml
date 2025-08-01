@@ -1,4 +1,4 @@
-name: 'AI分类任务'
+name: 'IPTV频道自动更新'
 
 on:
   schedule:
@@ -6,39 +6,36 @@ on:
   workflow_dispatch:
 
 jobs:
-  classify:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 设置超时时间
+    timeout-minutes: 30
     
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-        with:
-          lfs: true  # 启用Git LFS下载大文件
         
       - name: 设置Python环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'  # 缓存pip包
           
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopencc-dev build-essential
+          sudo apt-get install -y libopencc-dev
           
       - name: 安装Python依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
-      - name: 运行AI分类
+      - name: 运行频道更新
         run: python main.py
         
       - name: 提交结果
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git add live.txt live.m3u live_lite.txt live_lite.m3u
-          git commit -m "🤖 AI分类更新 $(date +'%Y-%m-%d %H:%M')" || echo "无更新"
+          git add live.txt live.m3u
+          git commit -m "🔄 自动更新 $(date +'%Y-%m-%d %H:%M')" || echo "无更新"
           git push
