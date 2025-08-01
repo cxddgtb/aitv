@@ -4,15 +4,20 @@ import re
 import time
 import requests
 import opencc
+import pickle
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import make_pipeline
 from tqdm import tqdm
 
 # --- 全局配置与初始化 ---
 timestart = datetime.now()
-print(f"🚀 IPTV频道分类系统启动 @ {timestart.strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"🚀 AI学习型IPTV系统启动 @ {timestart.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # --- 修复 OpenCC 加载问题 ---
 try:
@@ -34,6 +39,13 @@ except Exception as e:
 # 加载分类配置
 with open('category_config.json', 'r', encoding='utf-8') as f:
     CATEGORY_CONFIG = json.load(f)
+
+# 创建所有类别ID的列表
+ALL_CATEGORIES = []
+for category_type in CATEGORY_CONFIG.values():
+    for cat_id in category_type:
+        ALL_CATEGORIES.append(cat_id)
+ALL_CATEGORIES.extend(['cw', 'zb', 'mv', 'radio', 'lx', 'other'])
 
 # 配置 requests 会话
 def create_requests_session():
@@ -79,6 +91,134 @@ CHANNEL_PATTERNS = [
     (r'(HBO|CNN|BBC|NHK|DISCOVERY)(?:\s*[\u4e00-\u9fa5]+)?$', r'\1'),
     (r'(卫视|体育|新闻|电影|娱乐|卡通|国际|综合)(?:频道|台)', r'\1频道'),
 ]
+
+# --- AI学习模块 ---
+class AIClassifier:
+    def __init__(self):
+        self.model = None
+        self.vectorizer = None
+        self.training_data = []
+        self.training_labels = []
+        self.model_file = "ai_model.pkl"
+        self.training_data_file = "training_data.pkl"
+        
+        # 尝试加载现有模型
+        if os.path.exists(self.model_file) and os.path.exists(self.training_data_file):
+            try:
+                with open(self.model_file, 'rb') as f:
+                    self.model = pickle.load(f)
+                with open(self.training_data_file, 'rb') as f:
+                    data = pickle.load(f)
+                    self.training_data = data['texts']
+                    self.training_labels = data['labels']
+                print(f"✅ 加载AI模型，已有 {len(self.training_data)} 条训练数据")
+            except:
+                print("❌ 模型加载失败，将创建新模型")
+                self._init_new_model()
+        else:
+            self._init_new_model()
+    
+    def _init_new_model(self):
+        """初始化新的AI模型"""
+        # 创建简单的文本分类管道
+        self.vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
+        self.model = make_pipeline(self.vectorizer, MultinomialNB())
+        
+        # 添加初始训练数据
+        self._add_initial_training_data()
+        print("✅ 创建新AI模型")
+    
+    def _add_initial_training_data(self):
+        """添加初始训练数据"""
+        # 从分类配置中添加示例数据
+        for category_type in CATEGORY_CONFIG.values():
+            for cat_id, info in category_type.items():
+                # 添加关键词
+                for keyword in info.get("keywords", []):
+                    self.training_data.append(keyword)
+                    self.training_labels.append(cat_id)
+                
+                # 添加频道名称
+                for name in info.get("dictionary", []):
+                    self.training_data.append(name)
+                    self.training_labels.append(cat_id)
+        
+        # 添加特殊类别
+        special_categories = {
+            'cw': ["春晚", "春节联欢晚会", "央视春晚"],
+            'zb': ["直播中国", "中国直播"],
+            'mv': ["音乐", "MTV", "演唱会", "音乐现场"],
+            'radio': ["广播", "FM", "AM", "电台"],
+            'lx': ["回看", "重播", "回放", "录像", "录播"]
+        }
+        
+        for cat_id, examples in special_categories.items():
+            for example in examples:
+                self.training_data.append(example)
+                self.training_labels.append(cat_id)
+        
+        # 训练初始模型
+        self._train_model()
+    
+    def _train_model(self):
+        """训练AI模型"""
+        if len(self.training_data) > 0:
+            # 转换数据
+            X = self.training_data
+            y = self.training_labels
+            
+            # 训练模型
+            self.model.fit(X, y)
+            
+            # 保存模型
+            self.save_model()
+    
+    def predict(self, text):
+        """使用AI模型预测分类"""
+        if len(self.training_data) == 0:
+            return "other"
+        
+        # 预测概率
+        proba = self.model.predict_proba([text])[0]
+        max_proba_idx = np.argmax(proba)
+        max_proba = proba[max_proba_idx]
+        
+        # 获取类别
+        predicted_class = self.model.classes_[max_proba_idx]
+        
+        # 如果置信度低于阈值，返回"other"
+        if max_proba < 0.6:  # 可调整的置信度阈值
+            return "other"
+        
+        return predicted_class
+    
+    def add_feedback(self, channel_name, correct_category):
+        """添加用户反馈数据用于学习"""
+        # 添加到训练数据
+        self.training_data.append(channel_name)
+        self.training_labels.append(correct_category)
+        
+        # 重新训练模型
+        self._train_model()
+        
+        print(f"📝 已学习新样本: {channel_name} → {correct_category}")
+    
+    def save_model(self):
+        """保存模型到文件"""
+        # 保存模型
+        with open(self.model_file, 'wb') as f:
+            pickle.dump(self.model, f)
+        
+        # 保存训练数据
+        with open(self.training_data_file, 'wb') as f:
+            data = {
+                'texts': self.training_data,
+                'labels': self.training_labels
+            }
+            pickle.dump(data, f)
+
+# 初始化AI分类器
+ai_classifier = AIClassifier()
 
 # --- 核心功能函数 ---
 
@@ -237,16 +377,14 @@ def check_channel_availability(channel_info, timeout=2):
 
 def classify_channel(channel_name):
     """智能分类频道"""
-    channel_name_lower = channel_name.lower()
-    
     # 特殊频道优先处理
     if "春晚" in channel_name: return "cw"
     if "直播中国" in channel_name: return "zb"
-    if any(kw in channel_name_lower for kw in ["mtv", "music", "音樂", "演唱会"]): return "mv"
-    if any(kw in channel_name_lower for kw in ["radio", "广播", "fm", "am"]): return "radio"
+    if any(kw in channel_name.lower() for kw in ["mtv", "music", "音樂", "演唱会"]): return "mv"
+    if any(kw in channel_name.lower() for kw in ["radio", "广播", "fm", "am"]): return "radio"
     if any(kw in channel_name for kw in ["回看", "重播", "回放", "录像"]): return "lx"
     
-    # 遍历所有分类配置
+    # 尝试使用规则分类
     for category_type in CATEGORY_CONFIG.values():
         for category_id, info in category_type.items():
             # 先检查字典中的完整频道名称
@@ -256,10 +394,11 @@ def classify_channel(channel_name):
             
             # 再检查关键词
             for keyword in info.get("keywords", []):
-                if keyword in channel_name_lower:
+                if keyword in channel_name.lower():
                     return category_id
-                    
-    return "other"
+    
+    # 规则无法分类时，使用AI模型
+    return ai_classifier.predict(channel_name)
 
 def sort_data(order, data):
     order_dict = {name: i for i, name in enumerate(order)}
@@ -327,6 +466,29 @@ def save_files(categorized_lists):
         print(f"❌ 生成M3U文件出错: {e}")
 
     return total_channels
+
+# --- 反馈收集与学习 ---
+
+def collect_feedback(categorized_lists):
+    """收集可能的反馈数据用于AI学习"""
+    # 只收集"其他"类别的频道作为潜在学习样本
+    if 'other' not in categorized_lists:
+        return
+    
+    # 尝试为"其他"类别的频道寻找更好的分类
+    for item in categorized_lists['other']:
+        try:
+            channel_name, _ = item.split(',', 1)
+            
+            # 使用AI模型预测（不限制置信度）
+            ai_prediction = ai_classifier.model.predict([channel_name])[0]
+            
+            # 如果AI预测的类别不是"other"，添加到学习数据
+            if ai_prediction != 'other':
+                ai_classifier.add_feedback(channel_name, ai_prediction)
+                print(f"🤖 自动学习: {channel_name[:20]}... → {ai_prediction}")
+        except:
+            pass
 
 # --- 主执行流程 ---
 
@@ -405,6 +567,9 @@ def main():
             categorized_lists[category] = []
         categorized_lists[category].append(f"{name},{url}")
     
+    # 收集反馈用于学习
+    collect_feedback(categorized_lists)
+    
     # 打印分类统计
     print("\n📊 分类统计:")
     for cat_id, channels in categorized_lists.items():
@@ -426,6 +591,10 @@ def main():
     minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
     print(f"📊 总耗时: {minutes}分 {seconds}秒")
     print(f"📊 总计有效频道数: {total_saved}")
+    
+    # 保存AI模型状态
+    ai_classifier.save_model()
+    print(f"💾 AI模型已保存，当前训练数据: {len(ai_classifier.training_data)} 条")
 
 if __name__ == "__main__":
     main()
