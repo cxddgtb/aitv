@@ -2,13 +2,13 @@ name: 'IPTV频道自动更新'
 
 on:
   schedule:
-    - cron: '0 16 * * *'  # 每天UTC时间16:00运行(北京时间00:00)
+    - cron: '0 20 * * *'  # 每天UTC时间16:00运行(北京时间04:00)
   workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     
     steps:
       - name: 检出代码
@@ -36,6 +36,6 @@ jobs:
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git add live.txt live.m3u
-          git commit -m "🔄 自动更新 $(date +'%Y-%m-%d %H:%M')" || echo "无更新"
+          git add live.txt live.m3u ai_model.pkl training_data.pkl
+          git commit -m "🔄 自动更新+AI学习 $(date +'%Y-%m-%d %H:%M')" || echo "无更新"
           git push
