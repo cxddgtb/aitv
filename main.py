@@ -131,8 +131,10 @@ class AIClassifier:
         self.backup_data_file = "backup_data.pkl"
         
         # 确保目录存在
-        os.makedirs(os.path.dirname(self.model_file), exist_ok=True)
-        os.makedirs(os.path.dirname(self.training_data_file), exist_ok=True)
+        model_dir = os.path.dirname(self.model_file) if os.path.dirname(self.model_file) else "."
+        data_dir = os.path.dirname(self.training_data_file) if os.path.dirname(self.training_data_file) else "."
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
         
         # 尝试加载现有模型
         if os.path.exists(self.model_file) and os.path.exists(self.training_data_file):
