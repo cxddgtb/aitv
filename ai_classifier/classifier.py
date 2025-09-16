@@ -83,11 +83,4 @@ class LightweightChannelClassifier:
         return results
 
 # TextFeatureExtractor 类已在 text_model.py 中定义
-    """轻量级文本特征提取器"""
-    def __init__(self):
-        # 使用轻量级sentence-transformers模型
-        self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    
-    def extract(self, text):
-        """提取文本特征向量 (384维)"""
-        return self.model.encode([text])[0]
+
