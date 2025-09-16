@@ -1,11 +1,14 @@
 import os
+import sys
 import json
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from .text_model import TextFeatureExtractor
-from .classifier import CATEGORY_CONFIG
+
+# 添加当前目录到路径，以便导入模块
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from ai_classifier.text_model import TextFeatureExtractor, load_category_config
 
 def prepare_training_data():
     """准备训练数据（示例，实际需要真实数据）"""
@@ -14,22 +17,24 @@ def prepare_training_data():
     labels = []
     
     # 添加各类别样本
-    for category_type in CATEGORY_CONFIG.values():
+    category_config = load_category_config()
+    for category_type in category_config.values():
         for cat_id, info in category_type.items():
-            for name in info['dictionary']:
+            # 添加关键词
+            for keyword in info.get("keywords", []):
+                data.append(keyword)
+                labels.append(cat_id)
+            
+            # 添加频道名称
+            for name in info.get("dictionary", []):
                 data.append(name)
                 labels.append(cat_id)
     
-    # 添加一些常见频道
-    common_channels = [
-        "CCTV1 综合", "CCTV2 财经", "CCTV5 体育", 
-        "湖南卫视", "浙江卫视", "东方卫视",
-        "凤凰卫视", "Discovery探索", "国家地理"
-    ]
-    common_labels = ["ys", "ws", "ys", "ws", "ws", "ws", "hk", "kj", "kj"]
+    # 移除额外频道
+    # 不再需要额外频道
+    # 不再需要额外标签
     
-    data.extend(common_channels)
-    labels.extend(common_labels)
+    # 不再需要扩展操作
     
     return data, labels
 
